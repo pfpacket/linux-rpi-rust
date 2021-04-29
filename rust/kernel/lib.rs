@@ -111,6 +111,9 @@ pub use crate::types::{
 
 use core::marker::PhantomData;
 
+#[cfg(CONFIG_SPI)]
+pub mod spi;
+
 /// Page size defined in terms of the `PAGE_SHIFT` macro from C.
 ///
 /// [`PAGE_SHIFT`]: ../../../include/asm-generic/page.h
