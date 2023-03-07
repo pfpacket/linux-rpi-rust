@@ -23,6 +23,7 @@
 #include <linux/build_bug.h>
 #include <linux/clk.h>
 #include <linux/errname.h>
+#include <linux/etherdevice.h>
 #include <linux/fs_parser.h>
 #include <linux/gfp.h>
 #include <linux/highmem.h>
@@ -479,6 +480,12 @@ void *rust_helper_dev_get_drvdata(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(rust_helper_dev_get_drvdata);
 
+void rust_helper_dev_set_drvdata(struct device *dev, void *data)
+{
+	dev_set_drvdata(dev, data);
+}
+EXPORT_SYMBOL_GPL(rust_helper_dev_set_drvdata);
+
 const char *rust_helper_dev_name(const struct device *dev)
 {
 	return dev_name(dev);
@@ -710,6 +717,36 @@ void rust_helper_spi_message_add_tail(struct spi_transfer *t, struct spi_message
 	spi_message_add_tail(t, m);
 }
 EXPORT_SYMBOL_GPL(rust_helper_spi_message_add_tail);
+#endif
+
+#ifdef CONFIG_NET
+void rust_helper_eth_hw_addr_set(struct net_device *dev, const u8 *addr)
+{
+	eth_hw_addr_set(dev, addr);
+}
+EXPORT_SYMBOL_GPL(rust_helper_eth_hw_addr_set);
+
+void rust_helper_netif_start_queue(struct net_device *dev)
+{
+	netif_start_queue(dev);
+}
+EXPORT_SYMBOL_GPL(rust_helper_netif_start_queue);
+
+void rust_helper_netif_stop_queue(struct net_device *dev) {
+	netif_stop_queue(dev);
+}
+EXPORT_SYMBOL_GPL(rust_helper_netif_stop_queue);
+
+void rust_helper_netdev_sent_queue(struct net_device *dev, unsigned int bytes) {
+	return netdev_sent_queue(dev, bytes);
+}
+EXPORT_SYMBOL_GPL(rust_helper_netdev_sent_queue);
+
+struct sk_buff *rust_helper_netdev_alloc_skb_ip_align(struct net_device *dev,
+						      unsigned int length) {
+	return netdev_alloc_skb_ip_align(dev, length);
+}
+EXPORT_SYMBOL_GPL(rust_helper_netdev_alloc_skb_ip_align);
 #endif
 
 /*
