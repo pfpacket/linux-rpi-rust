@@ -6,7 +6,6 @@
 //! C header: [`include/linux/spi/spi.h`](../../../../include/linux/spi/spi.h)
 
 use crate::bindings;
-use crate::c_types;
 use crate::error::{code::*, Error, Result};
 use crate::str::CStr;
 use alloc::boxed::Box;
@@ -156,7 +155,7 @@ impl DriverRegistration {
 
     unsafe extern "C" fn probe_wrapper<T: SpiMethods>(
         spi_dev: *mut bindings::spi_device,
-    ) -> c_types::c_int {
+    ) -> core::ffi::c_int {
         // SAFETY: The `spi_dev` pointer is provided by the kernel and is sure to be valid.
         match T::probe(unsafe { SpiDevice::from_ptr(spi_dev) }) {
             Ok(_) => 0,
@@ -185,7 +184,7 @@ impl DriverRegistration {
             return Err(EINVAL);
         }
 
-        this.spi_driver.driver.name = this.name.as_ptr() as *const c_types::c_char;
+        this.spi_driver.driver.name = this.name.as_ptr() as *const core::ffi::c_char;
         this.spi_driver.probe = T::TO_USE
             .probe
             .then(|| DriverRegistration::probe_wrapper::<T> as _);
@@ -253,10 +252,10 @@ impl Spi {
         let res = unsafe {
             bindings::spi_write_then_read(
                 dev.to_ptr(),
-                tx_buf.as_ptr() as *const c_types::c_void,
-                tx_buf.len() as c_types::c_uint,
-                rx_buf.as_mut_ptr() as *mut c_types::c_void,
-                rx_buf.len() as c_types::c_uint,
+                tx_buf.as_ptr() as *const core::ffi::c_void,
+                tx_buf.len() as core::ffi::c_uint,
+                rx_buf.as_mut_ptr() as *mut core::ffi::c_void,
+                rx_buf.len() as core::ffi::c_uint,
             )
         };
 
