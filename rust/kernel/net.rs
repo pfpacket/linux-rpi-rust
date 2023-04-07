@@ -6,8 +6,20 @@
 //! [`include/linux/netdevice.h`](../../../../include/linux/netdevice.h),
 //! [`include/linux/skbuff.h`](../../../../include/linux/skbuff.h).
 
-use crate::{bindings, str::CStr, to_result, ARef, AlwaysRefCounted, Error, Result};
-use core::{cell::UnsafeCell, ptr::NonNull};
+use crate::{
+    bindings, device,
+    error::{code::ENOMEM, from_kernel_result},
+    str::CStr,
+    to_result,
+    types::ForeignOwnable,
+    ARef, AlwaysRefCounted, Error, Result,
+};
+use core::{
+    cell::UnsafeCell,
+    marker::PhantomData,
+    ptr::{addr_of, addr_of_mut, NonNull},
+};
+use macros::vtable;
 
 #[cfg(CONFIG_NETFILTER)]
 pub mod filter;
@@ -27,6 +39,357 @@ unsafe impl AlwaysRefCounted for Device {
         // SAFETY: The safety requirements guarantee that the refcount is nonzero.
         unsafe { bindings::dev_put(obj.cast().as_ptr()) };
     }
+}
+
+impl Device {
+    /// # Safety
+    ///
+    /// The caller must ensure that `ptr` is valid and remains valid for the lifetime of the
+    /// returned [`Device`] instance.
+    pub(crate) unsafe fn from_ptr<'a>(ptr: *const bindings::net_device) -> &'a Device {
+        // SAFETY: The safety requirements guarantee the validity of the dereference, while the
+        // `Device` type being transparent makes the cast ok.
+        unsafe { &*ptr.cast() }
+    }
+
+    /// Sets carrier.
+    pub fn netif_carrier_on(&self) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { bindings::netif_carrier_on(self.0.get()) }
+    }
+
+    /// Clears carrier.
+    pub fn netif_carrier_off(&self) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { bindings::netif_carrier_off(self.0.get()) }
+    }
+
+    /// Assigns Ethernet address to a net_device.
+    pub fn eth_hw_addr_set(&self, addr: &[u8; 6]) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { bindings::eth_hw_addr_set(self.0.get(), addr as _) }
+    }
+
+    /// Returns the mtu of the device.
+    pub fn mtu_get(&self) -> u32 {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { addr_of!((*self.0.get()).mtu).read() }
+    }
+
+    /// Sets the max mtu of the device.
+    pub fn max_mtu_set(&self, max_mtu: u32) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { addr_of_mut!((*self.0.get()).max_mtu).write(max_mtu) };
+    }
+
+    /// Sets the minimum mtu of the device.
+    pub fn min_mtu_set(&self, min_mtu: u32) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { addr_of_mut!((*self.0.get()).min_mtu).write(min_mtu) };
+    }
+
+    ///　Returns the flags of the device.
+    pub fn flags_get(&self) -> u32 {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { addr_of!((*self.0.get()).flags).read() }
+    }
+
+    ///　Sets the priv_flags of the device.
+    pub fn priv_flags_get(&self) -> u64 {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { addr_of!((*self.0.get()).priv_flags).read() }
+    }
+
+    ///　Returns the priv_flags of the device.
+    pub fn priv_flags_set(&self, flags: u64) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { addr_of_mut!((*self.0.get()).priv_flags).write(flags) }
+    }
+
+    /// Reports the number of bytes queued to hardware.
+    pub fn sent_queue(&self, bytes: u32) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { bindings::netdev_sent_queue(self.0.get(), bytes) }
+    }
+
+    /// Allows the upper layers to transmit.
+    pub fn netif_start_queue(&self) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { bindings::netif_start_queue(self.0.get()) }
+    }
+
+    /// Stop the upper layers to transmit.
+    pub fn netif_stop_queue(&self) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { bindings::netif_stop_queue(self.0.get()) }
+    }
+
+    /// Allocate an skbuff for rx on the device.
+    /// with IP header placed at an aligned offset.
+    pub fn alloc_skb_ip_align(&self, length: u32) -> Result<ARef<SkBuff>> {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        let skb = unsafe { bindings::netdev_alloc_skb_ip_align(self.0.get(), length) };
+        if skb.is_null() {
+            Err(ENOMEM)
+        } else {
+            Ok(unsafe { &*(skb as *const SkBuff) }.into())
+        }
+    }
+}
+
+/// Registration structure for a network device.
+pub struct Registration<T: DeviceOperations> {
+    dev: *mut bindings::net_device,
+    registered: bool,
+    _p: PhantomData<T>,
+}
+
+impl<T: DeviceOperations> Registration<T> {
+    /// Creates new instance of registration.
+    pub fn try_new(parent: &dyn device::RawDevice) -> Result<Self> {
+        // SAFETY: FFI call.
+        let dev = unsafe { bindings::alloc_etherdev_mqs(0, 1, 1) };
+        if dev.is_null() {
+            Err(ENOMEM)
+        } else {
+            // SAFETY: `dev` was allocated during initialization and is guaranteed to be valid.
+            unsafe { (*dev).dev.parent = parent.raw_device() }
+            Ok(Registration {
+                dev,
+                registered: false,
+                _p: PhantomData,
+            })
+        }
+    }
+
+    /// Returns a network device.
+    /// A driver might configure the device before registration.
+    pub fn dev_get(&self) -> ARef<Device> {
+        unsafe { &*(self.dev as *const Device) }.into()
+    }
+
+    /// Register a network device.
+    pub fn register(&mut self, data: T::Data) -> Result {
+        // SAFETY: `dev` was allocated during initialization and is guaranteed to be valid.
+        let ret = unsafe {
+            (*self.dev).netdev_ops = Self::build_device_ops();
+            bindings::register_netdev(self.dev)
+        };
+        if ret != 0 {
+            Err(Error::from_kernel_errno(ret))
+        } else {
+            self.registered = true;
+            unsafe {
+                // SAFETY: The C contract guarantees that `data` is available
+                // for implementers of the net_device operations (no other C code accesses
+                // it), so we know that there are no concurrent threads/CPUs accessing
+                // it (it's not visible to any other Rust code).
+                bindings::dev_set_drvdata(&mut (*self.dev).dev, data.into_foreign() as _);
+            }
+            Ok(())
+        }
+    }
+}
+
+impl<T: DeviceOperations> Drop for Registration<T> {
+    fn drop(&mut self) {
+        // SAFETY: `dev` was allocated during initialization and guaranteed to be valid.
+        unsafe {
+            if self.registered {
+                bindings::unregister_netdev(self.dev);
+            }
+            bindings::free_netdev(self.dev);
+        }
+    }
+}
+
+impl<T: DeviceOperations> Registration<T> {
+    const DEVICE_OPS: bindings::net_device_ops = bindings::net_device_ops {
+        ndo_init: None,
+        ndo_uninit: None,
+        ndo_open: if <T>::HAS_OPEN {
+            Some(Self::open_callback)
+        } else {
+            None
+        },
+        ndo_stop: if <T>::HAS_STOP {
+            Some(Self::stop_callback)
+        } else {
+            None
+        },
+        ndo_start_xmit: if <T>::HAS_START_XMIT {
+            Some(Self::start_xmit_callback)
+        } else {
+            None
+        },
+        ndo_features_check: None,
+        ndo_select_queue: None,
+        ndo_change_rx_flags: None,
+        ndo_set_rx_mode: None,
+        ndo_set_mac_address: None,
+        ndo_validate_addr: None,
+        ndo_do_ioctl: None,
+        ndo_eth_ioctl: None,
+        ndo_siocbond: None,
+        ndo_siocwandev: None,
+        ndo_siocdevprivate: None,
+        ndo_set_config: None,
+        ndo_change_mtu: None,
+        ndo_neigh_setup: None,
+        ndo_tx_timeout: None,
+        ndo_get_stats64: None,
+        ndo_has_offload_stats: None,
+        ndo_get_offload_stats: None,
+        ndo_get_stats: None,
+        ndo_vlan_rx_add_vid: None,
+        ndo_vlan_rx_kill_vid: None,
+        #[cfg(CONFIG_NET_POLL_CONTROLLER)]
+        ndo_poll_controller: None,
+        #[cfg(CONFIG_NET_POLL_CONTROLLER)]
+        ndo_netpoll_setup: None,
+        #[cfg(CONFIG_NET_POLL_CONTROLLER)]
+        ndo_netpoll_cleanup: None,
+        ndo_set_vf_mac: None,
+        ndo_set_vf_vlan: None,
+        ndo_set_vf_rate: None,
+        ndo_set_vf_spoofchk: None,
+        ndo_set_vf_trust: None,
+        ndo_get_vf_config: None,
+        ndo_set_vf_link_state: None,
+        ndo_get_vf_stats: None,
+        ndo_set_vf_port: None,
+        ndo_get_vf_port: None,
+        ndo_get_vf_guid: None,
+        ndo_set_vf_guid: None,
+        ndo_set_vf_rss_query_en: None,
+        ndo_setup_tc: None,
+        #[cfg(CONFIG_FCOE)]
+        ndo_fcoe_enable: None,
+        #[cfg(CONFIG_FCOE)]
+        ndo_fcoe_disable: None,
+        #[cfg(CONFIG_FCOE)]
+        ndo_fcoe_ddp_setup: None,
+        #[cfg(CONFIG_FCOE)]
+        ndo_fcoe_ddp_done: None,
+        #[cfg(CONFIG_FCOE)]
+        ndo_fcoe_ddp_target: None,
+        #[cfg(CONFIG_FCOE)]
+        ndo_fcoe_get_hbainfo: None,
+        #[cfg(CONFIG_FCOE)]
+        ndo_fcoe_get_wwn: None,
+        #[cfg(CONFIG_RFS_ACCEL)]
+        ndo_rx_flow_steer: None,
+        ndo_add_slave: None,
+        ndo_del_slave: None,
+        ndo_get_xmit_slave: None,
+        ndo_sk_get_lower_dev: None,
+        ndo_fix_features: None,
+        ndo_set_features: None,
+        ndo_neigh_construct: None,
+        ndo_neigh_destroy: None,
+        ndo_fdb_add: None,
+        ndo_fdb_del: None,
+        ndo_fdb_del_bulk: None,
+        ndo_fdb_dump: None,
+        ndo_fdb_get: None,
+        ndo_bridge_setlink: None,
+        ndo_bridge_getlink: None,
+        ndo_bridge_dellink: None,
+        ndo_change_carrier: None,
+        ndo_get_phys_port_id: None,
+        ndo_get_port_parent_id: None,
+        ndo_get_phys_port_name: None,
+        ndo_dfwd_add_station: None,
+        ndo_dfwd_del_station: None,
+        ndo_set_tx_maxrate: None,
+        ndo_get_iflink: None,
+        ndo_fill_metadata_dst: None,
+        ndo_set_rx_headroom: None,
+        ndo_bpf: None,
+        ndo_xdp_xmit: None,
+        ndo_xdp_get_xmit_slave: None,
+        ndo_xsk_wakeup: None,
+        ndo_tunnel_ctl: None,
+        ndo_get_peer_dev: None,
+        ndo_fill_forward_path: None,
+        ndo_get_tstamp: None,
+    };
+
+    const fn build_device_ops() -> &'static bindings::net_device_ops {
+        &Self::DEVICE_OPS
+    }
+
+    unsafe extern "C" fn open_callback(netdev: *mut bindings::net_device) -> core::ffi::c_int {
+        from_kernel_result! {
+            // SAFETY: The C API guarantees that `net_device` isn't released while this function is running.
+            let dev = unsafe { Device::from_ptr(netdev) };
+            // SAFETY: The value stored as driver data was returned by `into_foreign` during registration.
+            let data = unsafe { T::Data::borrow(bindings::dev_get_drvdata(&mut (*netdev).dev)) };
+            T::open(dev, data)?;
+            Ok(0)
+        }
+    }
+
+    unsafe extern "C" fn stop_callback(netdev: *mut bindings::net_device) -> core::ffi::c_int {
+        from_kernel_result! {
+            // SAFETY: The C API guarantees that `net_device` isn't released while this function is running.
+            let dev = unsafe { Device::from_ptr(netdev) };
+            // SAFETY: The value stored as driver data was returned by `into_foreign` during registration.
+            let data = unsafe { T::Data::borrow(bindings::dev_get_drvdata(&mut (*netdev).dev)) };
+            T::stop(dev, data)?;
+            Ok(0)
+        }
+    }
+
+    unsafe extern "C" fn start_xmit_callback(
+        skb: *mut bindings::sk_buff,
+        netdev: *mut bindings::net_device,
+    ) -> bindings::netdev_tx_t {
+        // SAFETY: The C API guarantees that `net_device` isn't released while this function is running.
+        let dev = unsafe { Device::from_ptr(netdev) };
+        // SAFETY: The C API guarantees that `sk_buff` isn't released while this function is running.
+        let skb = unsafe { SkBuff::from_ptr(skb) };
+        // SAFETY: The value stored as driver data was returned by `into_foreign` during registration.
+        let data = unsafe { T::Data::borrow(bindings::dev_get_drvdata(&mut (*netdev).dev)) };
+        T::start_xmit(skb, dev, data) as bindings::netdev_tx_t
+    }
+}
+
+/// Driver transmit return codes.
+#[repr(i32)]
+pub enum NetdevTx {
+    /// Driver took care of packet.
+    Ok = bindings::netdev_tx_NETDEV_TX_OK,
+    /// Driver tx path was busy.
+    Busy = bindings::netdev_tx_NETDEV_TX_BUSY,
+}
+
+// SAFETY: `Registration` does not expose any of its state across threads.
+unsafe impl<T: DeviceOperations> Sync for Registration<T> {}
+
+// SAFETY: `Registration` is not restricted to a single thread,
+// its `T::Data` is also `Send` so it may be moved to different threads.
+#[allow(clippy::non_send_fields_in_send_ty)]
+unsafe impl<T: DeviceOperations> Send for Registration<T> {}
+
+/// Corresponds to the kernel's `struct net_device_ops`.
+#[vtable]
+pub trait DeviceOperations {
+    /// The pointer type that will be used to hold driver-defined data type.
+    type Data: ForeignOwnable + Send + Sync = ();
+
+    /// Corresponds to `ndo_open` in `struct net_device_ops`.
+    fn open(dev: &Device, data: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result;
+
+    /// Corresponds to `ndo_stop` in `struct net_device_ops`.
+    fn stop(dev: &Device, data: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result;
+
+    /// Corresponds to `ndo_start_xmit` in `struct net_device_ops`.
+    fn start_xmit(
+        skb: &SkBuff,
+        dev: &Device,
+        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+    ) -> NetdevTx;
 }
 
 /// Wraps the kernel's `struct net`.
