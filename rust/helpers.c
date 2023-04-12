@@ -36,6 +36,7 @@
 #include <linux/platform_device.h>
 #include <linux/sched/signal.h>
 #include <linux/security.h>
+#include <linux/spi/spi.h>
 #include <linux/skbuff.h>
 #include <linux/uaccess.h>
 #include <linux/uio.h>
@@ -654,6 +655,38 @@ int rust_helper_fs_parse(struct fs_context *fc,
 	return fs_parse(fc, desc, param, result);
 }
 EXPORT_SYMBOL_GPL(rust_helper_fs_parse);
+
+#ifdef CONFIG_SPI
+void rust_helper_spi_unregister_driver(struct spi_driver *sdrv)
+{
+	spi_unregister_driver(sdrv);
+}
+EXPORT_SYMBOL_GPL(rust_helper_spi_unregister_driver);
+
+void rust_helper_spi_set_drvdata(struct spi_device *spi, void *data)
+{
+	dev_set_drvdata(&spi->dev, data);
+}
+EXPORT_SYMBOL_GPL(rust_helper_spi_set_drvdata);
+
+void *rust_helper_spi_get_drvdata(struct spi_device *spi)
+{
+	return dev_get_drvdata(&spi->dev);
+}
+EXPORT_SYMBOL_GPL(rust_helper_spi_get_drvdata);
+
+struct spi_device *rust_helper_spi_dev_get(struct spi_device *spi)
+{
+	return spi_dev_get(spi);
+}
+EXPORT_SYMBOL_GPL(rust_helper_spi_dev_get);
+
+void rust_helper_spi_dev_put(struct spi_device *spi)
+{
+	spi_dev_put(spi);
+}
+EXPORT_SYMBOL_GPL(rust_helper_spi_dev_put);
+#endif
 
 /*
  * We use `bindgen`'s `--size_t-is-usize` option to bind the C `size_t` type

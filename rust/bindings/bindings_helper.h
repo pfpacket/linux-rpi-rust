@@ -32,6 +32,7 @@
 #include <linux/random.h>
 #include <linux/security.h>
 #include <linux/slab.h>
+#include <linux/spi/spi.h>
 #include <linux/sysctl.h>
 #include <linux/uaccess.h>
 #include <linux/uio.h>
