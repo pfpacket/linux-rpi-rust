@@ -5,253 +5,228 @@
 //!
 //! C header: [`include/linux/spi/spi.h`](../../../../include/linux/spi/spi.h)
 
-use crate::bindings;
-use crate::error::{code::*, Error, Result};
-use crate::str::CStr;
-use alloc::boxed::Box;
-use core::pin::Pin;
-
-/// Wrapper struct around the kernel's `spi_device`.
-#[derive(Clone, Copy)]
-pub struct SpiDevice(*mut bindings::spi_device);
-
-impl SpiDevice {
-    /// Create an [`SpiDevice`] from a mutable spi_device raw pointer. This function is unsafe
-    /// as the pointer might be invalid.
-    ///
-    /// The pointer must be valid. This can be achieved by calling `to_ptr` on a previously
-    /// constructed, safe `SpiDevice` instance, or by making sure that the pointer points
-    /// to valid memory.
-    ///
-    /// You probably do not want to use this abstraction directly. It is mainly used
-    /// by this abstraction to wrap valid pointers given by the Kernel to the different
-    /// SPI methods: `probe`, `remove` and `shutdown`.
-    pub unsafe fn from_ptr(dev: *mut bindings::spi_device) -> Self {
-        SpiDevice(dev)
-    }
-
-    /// Access the raw pointer from an [`SpiDevice`] instance.
-    pub fn to_ptr(&mut self) -> *mut bindings::spi_device {
-        self.0
-    }
-}
-
-/// Registration of an SPI driver.
-pub struct DriverRegistration {
-    this_module: &'static crate::ThisModule,
-    registered: bool,
-    name: &'static CStr,
-    spi_driver: bindings::spi_driver,
-}
-
-/// Represents which methods of the SPI driver shall be implemented.
-pub struct ToUse {
-    /// The `probe` field of `spi_driver`.
-    pub probe: bool,
-
-    /// The `remove` field of `spi_driver`.
-    pub remove: bool,
-
-    /// The `shutdown` field of `spi_driver`.
-    pub shutdown: bool,
-}
-
-/// Default table to use for SPI methods. All fields are set to false, meaning that the
-/// kernel's default implementations will be used.
-pub const USE_NONE: ToUse = ToUse {
-    probe: false,
-    remove: false,
-    shutdown: false,
+use crate::{
+    AlwaysRefCounted,
+    bindings,
+    driver,
+    device::{self, RawDevice},
+    error::{code::*, Error, from_kernel_result, Result},
+    of,
+    str::CStr,
+    to_result,
+    types::ForeignOwnable,
+    ThisModule,
 };
 
-/// Corresponds to the kernel's spi_driver's methods. Implement this trait on a type to
-/// express the need of a custom probe, remove or shutdown function for your SPI driver.
-/// Use the [`declare_spi_methods`] macro to declare which methods you wish to use.
-pub trait SpiMethods {
-    /// The methods to define. Use [`declare_spi_methods`] to declare them.
-    const TO_USE: ToUse;
+/// A registration of a SPI driver.
+pub type Registration<T> = driver::Registration<Adapter<T>>;
 
-    /// Corresponds to the kernel's `spi_driver`'s `probe` method field.
-    fn probe(mut _spi_dev: SpiDevice) -> Result {
-        Ok(())
-    }
+/// An adapter for the registration of SPI drivers.
+pub struct Adapter<T: Driver>(T);
 
-    /// Corresponds to the kernel's `spi_driver`'s `remove` method field.
-    fn remove(mut _spi_dev: SpiDevice) {}
+impl<T: Driver> driver::DriverOps for Adapter<T> {
+    type RegType = bindings::spi_driver;
 
-    /// Corresponds to the kernel's `spi_driver`'s `shutdown` method field.
-    fn shutdown(mut _spi_dev: SpiDevice) {}
-}
-
-/// Populate the `TO_USE` field in the [`SpiMethods`] implementer.
-///
-/// # Examples
-///
-/// ```
-/// impl SpiMethods for MySpiMethods {
-///     /// Let's say you only want a probe and remove method, no shutdown.
-///     declare_spi_methods!(probe, remove);
-///
-///     /// Define your probe and remove methods. If you don't, default implementations
-///     /// will be used instead. These default implementations do *not* correspond to the
-///     /// kernel's default implementations! If you wish to use the kernel's default
-///     /// SPI functions implementations, do not declare them using the `declare_spi_methods`
-///     /// macro. For example, here our driver will use the kernel's `shutdown` method.
-///     fn probe(spi_dev: SpiDevice) -> Result {
-///         // ...
-///
-///         Ok(())
-///     }
-///
-///     fn remove(spi_dev: SpiDevice) -> Result {
-///         // ...
-///
-///         Ok(())
-///     }
-/// }
-/// ```
-#[macro_export]
-macro_rules! declare_spi_methods {
-    () => {
-        const TO_USE: $crate::spi::ToUse = $crate::spi::USE_NONE;
-    };
-    ($($method:ident),+) => {
-        const TO_USE: $crate::spi::ToUse = $crate::spi::ToUse {
-            $($method: true),+,
-            ..$crate::spi::USE_NONE
-        };
-    };
-}
-
-impl DriverRegistration {
-    fn new(this_module: &'static crate::ThisModule, name: &'static CStr) -> Self {
-        DriverRegistration {
-            this_module,
-            name,
-            registered: false,
-            spi_driver: bindings::spi_driver::default(),
-        }
-    }
-
-    /// Create a new `DriverRegistration` and register it. This is equivalent to creating
-    /// a static `spi_driver` and then calling `spi_driver_register` on it in C.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let spi_driver =
-    ///     spi::DriverRegistration::new_pinned::<MySpiMethods>(&THIS_MODULE, cstr!("my_driver_name"))?;
-    /// ```
-    pub fn new_pinned<T: SpiMethods>(
-        this_module: &'static crate::ThisModule,
+    unsafe fn register(
+        reg: *mut bindings::spi_driver,
         name: &'static CStr,
-    ) -> Result<Pin<Box<Self>>> {
-        let mut registration = Pin::from(Box::try_new(Self::new(this_module, name))?);
+        module: &'static ThisModule,
+    ) -> Result {
+        // SAFETY: By the safety requirements of this function (defined in the trait definition),
+        // `reg` is non-null and valid.
+        let spidrv = unsafe { &mut *reg };
 
-        registration.as_mut().register::<T>()?;
-
-        Ok(registration)
-    }
-
-    unsafe extern "C" fn probe_wrapper<T: SpiMethods>(
-        spi_dev: *mut bindings::spi_device,
-    ) -> core::ffi::c_int {
-        // SAFETY: The `spi_dev` pointer is provided by the kernel and is sure to be valid.
-        match T::probe(unsafe { SpiDevice::from_ptr(spi_dev) }) {
-            Ok(_) => 0,
-            Err(e) => e.to_kernel_errno(),
-        }
-    }
-
-    unsafe extern "C" fn remove_wrapper<T: SpiMethods>(spi_dev: *mut bindings::spi_device) {
-        // SAFETY: The `spi_dev` pointer is provided by the kernel and is sure to be valid.
-        T::remove(unsafe { SpiDevice::from_ptr(spi_dev) });
-    }
-
-    unsafe extern "C" fn shutdown_wrapper<T: SpiMethods>(spi_dev: *mut bindings::spi_device) {
-        // SAFETY: The `spi_dev` pointer is provided by the kernel and is sure to be valid.
-        T::shutdown(unsafe { SpiDevice::from_ptr(spi_dev) })
-    }
-
-    /// Register a [`DriverRegistration`]. This is equivalent to calling `spi_driver_register`
-    /// on your `spi_driver` in C, without creating it first.
-    fn register<T: SpiMethods>(self: Pin<&mut Self>) -> Result {
-        // SAFETY: We do not move out of the reference we get, and are only registering
-        // `this` once over the course of the module, since we check that the `registered`
-        // field was not already set to true.
-        let this = unsafe { self.get_unchecked_mut() };
-        if this.registered {
-            return Err(EINVAL);
+        spidrv.driver.name = name.as_char_ptr();
+        spidrv.probe = Some(Self::probe_callback);
+        spidrv.remove = Some(Self::remove_callback);
+        spidrv.shutdown = Some(Self::shutdown_callback);
+        if let Some(t) = T::OF_DEVICE_ID_TABLE {
+            spidrv.driver.of_match_table = t.as_ref();
         }
 
-        this.spi_driver.driver.name = this.name.as_ptr() as *const core::ffi::c_char;
-        this.spi_driver.probe = T::TO_USE
-            .probe
-            .then(|| DriverRegistration::probe_wrapper::<T> as _);
-        this.spi_driver.remove = T::TO_USE
-            .remove
-            .then(|| DriverRegistration::remove_wrapper::<T> as _);
-        this.spi_driver.shutdown = T::TO_USE
-            .shutdown
-            .then(|| DriverRegistration::shutdown_wrapper::<T> as _);
+        // SAFETY:
+        //   - `spidrv` lives at least until the call to `spi_driver_unregister()` returns.
+        //   - `name` pointer has static lifetime.
+        //   - `module.0` lives at least as long as the module.
+        //   - `probe()` and `remove()` are static functions.
+        //   - `of_match_table` is either a raw pointer with static lifetime,
+        //      as guaranteed by the [`driver::IdTable`] type, or null.
+        to_result(unsafe { bindings::__spi_register_driver(module.0, reg) })
+    }
 
-        // SAFETY: Since we are using a pinned `self`, we can register the driver safely as
-        // if we were using a static instance. The kernel will access this driver over the
-        // entire lifespan of a module and therefore needs a pointer valid for the entirety
-        // of this lifetime.
-        let res =
-            unsafe { bindings::__spi_register_driver(this.this_module.0, &mut this.spi_driver) };
-
-        if res != 0 {
-            return Err(Error::from_kernel_errno(res));
-        }
-
-        this.registered = true;
-        Ok(())
+    unsafe fn unregister(reg: *mut bindings::spi_driver) {
+        // SAFETY: By the safety requirements of this function (defined in the trait definition),
+        // `reg` was passed (and updated) by a previous successful call to
+        // `spi_driver_register`.
+        unsafe { bindings::spi_unregister_driver(reg) };
     }
 }
 
-impl Drop for DriverRegistration {
-    fn drop(&mut self) {
-        // SAFETY: We are simply unregistering an `spi_driver` that we know to be valid.
-        // [`DriverRegistration`] instances can only be created by being registered at the
-        // same time, so we are sure that we'll never unregister an unregistered `spi_driver`.
-        unsafe { bindings::driver_unregister(&mut self.spi_driver.driver) }
+impl<T: Driver> Adapter<T> {
+    fn get_id_info(dev: &Device) -> Option<&'static T::IdInfo> {
+        let table = T::OF_DEVICE_ID_TABLE?;
+
+        // SAFETY: `table` has static lifetime, so it is valid for read. `dev` is guaranteed to be
+        // valid while it's alive, so is the raw device returned by it.
+        let id = unsafe { bindings::of_match_device(table.as_ref(), dev.raw_device()) };
+        if id.is_null() {
+            return None;
+        }
+
+        // SAFETY: `id` is a pointer within the static table, so it's always valid.
+        let offset = unsafe { (*id).data };
+        if offset.is_null() {
+            return None;
+        }
+
+        // SAFETY: The offset comes from a previous call to `offset_from` in `IdArray::new`, which
+        // guarantees that the resulting pointer is within the table.
+        let ptr = unsafe {
+            id.cast::<u8>()
+                .offset(offset as _)
+                .cast::<Option<T::IdInfo>>()
+        };
+
+        // SAFETY: The id table has a static lifetime, so `ptr` is guaranteed to be valid for read.
+        #[allow(clippy::needless_borrow)]
+        unsafe {
+            (&*ptr).as_ref()
+        }
+    }
+
+    extern "C" fn probe_callback(spidev: *mut bindings::spi_device) -> core::ffi::c_int {
+        from_kernel_result! {
+            // SAFETY: `spidev` is valid by the contract with the C code. `dev` is alive only for the
+            // duration of this call, so it is guaranteed to remain alive for the lifetime of
+            // `spidev`.
+            unsafe { Device::from_ptr(spidev) }
+                .and_then(|dev| {
+                    let info = Self::get_id_info(&dev);
+                    let data = T::probe(dev, info)?;
+                    // SAFETY: `spidev` is guaranteed to be a valid, non-null pointer.
+                    unsafe { bindings::spi_set_drvdata(spidev, data.into_foreign() as _) };
+                    Ok(0)
+                })
+        }
+    }
+
+    extern "C" fn remove_callback(spidev: *mut bindings::spi_device) {
+        // SAFETY: `spidev` is guaranteed to be a valid, non-null pointer.
+        if let Ok(dev) = unsafe { Device::from_ptr(spidev) } {
+            // SAFETY: `spidev` is guaranteed to be a valid, non-null pointer.
+            let ptr = unsafe { bindings::spi_get_drvdata(spidev) };
+            // SAFETY:
+            //   - we allocated this pointer using `T::Data::into_foreign`,
+            //     so it is safe to turn back into a `T::Data`.
+            //   - the allocation happened in `probe`, no-one freed the memory,
+            //     `remove` is the canonical kernel location to free driver data. so OK
+            //     to convert the pointer back to a Rust structure here.
+            let data = unsafe { T::Data::from_foreign(ptr) };
+            T::remove(dev, &data);
+            <T::Data as driver::DeviceRemoval>::device_remove(&data);
+        }
+    }
+
+    extern "C" fn shutdown_callback(spidev: *mut bindings::spi_device) {
+        // SAFETY: `spidev` is guaranteed to be a valid, non-null pointer.
+        if let Ok(dev) = unsafe { Device::from_ptr(spidev) } {
+            // SAFETY: `spidev` is guaranteed to be a valid, non-null pointer.
+            let ptr = unsafe { bindings::spi_get_drvdata(spidev) };
+            // SAFETY: the driver data stored is valid until `remove_callback` drops it.
+            let data = unsafe { T::Data::borrow(ptr) };
+            T::shutdown(dev, data);
+        }
     }
 }
 
-// SAFETY: The only method is `register()`, which requires a (pinned) mutable `Registration`, so it
-// is safe to pass `&Registration` to multiple threads because it offers no interior mutability.
-unsafe impl Sync for DriverRegistration {}
-
-// SAFETY: All functions work from any thread.
-unsafe impl Send for DriverRegistration {}
-
-/// High level abstraction over the kernel's SPI functions such as `spi_write_then_read`.
-pub struct Spi;
-
-impl Spi {
-    /// Corresponds to the kernel's `spi_write_then_read`.
+/// A SPI driver.
+pub trait Driver {
+    /// Data stored on device by driver.
     ///
-    /// # Examples
+    /// Corresponds to the data set or retrieved via the kernel's
+    /// `spi_{set,get}_drvdata()` functions.
     ///
-    /// ```
-    /// let to_write = "rust-for-linux".as_bytes();
-    /// let mut to_receive = [0u8; 10]; // let's receive 10 bytes back
+    /// Require that `Data` implements `ForeignOwnable`. We guarantee to
+    /// never move the underlying wrapped data structure. This allows
+    type Data: ForeignOwnable + Send + Sync + driver::DeviceRemoval = ();
+
+    /// The type holding information about each device id supported by the driver.
+    type IdInfo: 'static = ();
+
+    /// The table of device ids supported by the driver.
+    const OF_DEVICE_ID_TABLE: Option<driver::IdTable<'static, of::DeviceId, Self::IdInfo>> = None;
+
+    /// SPI driver probe.
     ///
-    /// // `spi_device` was previously provided by the kernel in that case
-    /// let transfer_result = Spi::write_then_read(spi_device, &to_write, &mut to_receive);
-    /// ```
-    pub fn write_then_read(dev: &mut SpiDevice, tx_buf: &[u8], rx_buf: &mut [u8]) -> Result {
-        // SAFETY: The `dev` argument must uphold the safety guarantees made when creating
-        // the [`SpiDevice`] instance. It should therefore point to a valid `spi_device`
-        // and valid memory. We also know that a rust slice will always contain a proper
-        // size and that it is safe to use as is. Converting from a Rust pointer to a
-        // generic C `void*` pointer is normal, and does not pose size issues on the
-        // kernel's side, which will use the given Transfer Receive sizes as bytes.
+    /// Called when a new SPI device is added or discovered.
+    /// Implementers should attempt to initialize the device here.
+    fn probe(dev: Device, id_info: Option<&Self::IdInfo>) -> Result<Self::Data>;
+
+    /// SPI driver remove.
+    ///
+    /// Called when a SPI device is removed.
+    /// Implementers should prepare the device for complete removal here.
+    fn remove(_dev: Device, _data: &Self::Data) {
+    }
+
+    /// SPI driver shutdown.
+    ///
+    /// Called during system state transitions such as powerdown/halt and kexec.
+    /// Implementers should attempt to shutdown the device here.
+    fn shutdown(_dev: Device, _data: <Self::Data as ForeignOwnable>::Borrowed<'_>) {
+    }
+}
+
+/// A SPI device.
+///
+/// # Invariants
+///
+/// The field `ptr` is non-null and valid for the lifetime of the object.
+#[repr(transparent)]
+pub struct Device(*mut bindings::spi_device);
+
+unsafe impl AlwaysRefCounted for Device {
+    fn inc_ref(&self) {
+        // SAFETY: The existence of a shared reference means that the refcount is nonzero.
+        unsafe { bindings::spi_dev_get(self.0) };
+    }
+
+    unsafe fn dec_ref(obj: core::ptr::NonNull<Self>) {
+        // SAFETY: The safety requirements guarantee that the refcount is nonzero.
+        unsafe { bindings::spi_dev_put(obj.cast().as_ptr()) };
+    }
+}
+
+// SAFETY:
+//  - `Device` holds the lock of device when needed.
+//  - `Device` does not let you touch the underlying pointer to `spi_device`.
+unsafe impl Sync for Device {}
+unsafe impl Send for Device {}
+
+impl Device {
+    /// Creates a new device from the given pointer.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be non-null and valid. It must remain valid for the lifetime of the returned
+    /// instance.
+    unsafe fn from_ptr(ptr: *mut bindings::spi_device) -> Result<Self> {
+        // SAFETY: increment refcount to ensure `spi_device` is alive until `Device` gets dropped.
+        let ptr = unsafe { bindings::spi_dev_get(ptr) };
+
+        if ptr.is_null() {
+            Err(EINVAL)
+        } else {
+            // INVARIANT: The safety requirements of the function ensure the lifetime invariant.
+            Ok(Self(ptr))
+        }
+    }
+
+    pub fn write_then_read(&self, tx_buf: &[u8], rx_buf: &mut [u8]) -> Result {
+        // SAFETY: `Device` is alive until removed
         let res = unsafe {
             bindings::spi_write_then_read(
-                dev.to_ptr(),
+                self.0,
                 tx_buf.as_ptr() as *const core::ffi::c_void,
                 tx_buf.len() as core::ffi::c_uint,
                 rx_buf.as_mut_ptr() as *mut core::ffi::c_void,
@@ -260,36 +235,63 @@ impl Spi {
         };
 
         match res {
-            0 => Ok(()),                               // 0 indicates a valid transfer,
-            err => Err(Error::from_kernel_errno(err)), // A negative number indicates an error
+            0 => Ok(()),
+            err => Err(Error::from_kernel_errno(err))
         }
     }
 
-    /// Corresponds to the kernel's `spi_write`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let to_write = "rust-for-linux".as_bytes();
-    ///
-    /// // `spi_device` was previously provided by the kernel in that case
-    /// let write_result = Spi::write(spi_device, &to_write);
-    /// ```
-    pub fn write(dev: &mut SpiDevice, tx_buf: &[u8]) -> Result {
-        Spi::write_then_read(dev, tx_buf, &mut [0u8; 0])
+    pub fn write(&self, tx_buf: &[u8]) -> Result {
+        self.write_then_read(tx_buf, &mut [0u8, 0])
     }
 
-    /// Corresponds to the kernel's `spi_read`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut to_receive = [0u8; 10]; // let's receive 10 bytes
-    ///
-    /// // `spi_device` was previously provided by the kernel in that case
-    /// let transfer_result = Spi::read(spi_device, &mut to_receive);
-    /// ```
-    pub fn read(dev: &mut SpiDevice, rx_buf: &mut [u8]) -> Result {
-        Spi::write_then_read(dev, &[0u8; 0], rx_buf)
+    pub fn read(&self, rx_buf: &mut [u8]) -> Result {
+        self.write_then_read(&[0u8, 0], rx_buf)
     }
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        // SAFETY: The refcount of `spi_device` is incremented when constructing `Device`.
+        unsafe { bindings::spi_dev_put(self.0) };
+    }
+}
+
+// SAFETY: The device returned by `raw_device` is the raw SPI device.
+unsafe impl device::RawDevice for Device {
+    fn raw_device(&self) -> *mut bindings::device {
+        // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
+        unsafe { &mut (*self.0).dev }
+    }
+}
+
+/// Declares a kernel module that exposes a single SPI driver.
+///
+/// # Examples
+///
+/// ```ignore
+/// # use kernel::{spi, define_of_id_table, module_spi_driver};
+/// #
+/// struct MyDriver;
+/// impl spi::Driver for MyDriver {
+///     // [...]
+/// #   fn probe(_dev: &mut spi::Device, _id_info: Option<&Self::IdInfo>) -> Result {
+/// #       Ok(())
+/// #   }
+/// #   define_of_id_table! {(), [
+/// #       (of::DeviceId::Compatible(b"brcm,bcm2835-rng"), None),
+/// #   ]}
+/// }
+///
+/// module_spi_driver! {
+///     type: MyDriver,
+///     name: "module_name",
+///     author: "Author name",
+///     license: "GPL",
+/// }
+/// ```
+#[macro_export]
+macro_rules! module_spi_driver {
+    ($($f:tt)*) => {
+        $crate::module_driver!(<T>, $crate::spi::Adapter<T>, { $($f)* });
+    };
 }
