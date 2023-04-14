@@ -11,7 +11,7 @@ use crate::{
     driver,
     error::{code::*, from_kernel_result, Error, Result},
     of,
-    str::CStr,
+    str::{BStr, CStr},
     to_result,
     types::ForeignOwnable,
     AlwaysRefCounted, ThisModule,
@@ -39,6 +39,11 @@ impl<T: Driver> driver::DriverOps for Adapter<T> {
         spidrv.probe = Some(Self::probe_callback);
         spidrv.remove = Some(Self::remove_callback);
         spidrv.shutdown = Some(Self::shutdown_callback);
+
+        if let Some(t) = T::SPI_DEVICE_ID_TABLE {
+            spidrv.id_table = t.as_ref();
+        }
+
         if let Some(t) = T::OF_DEVICE_ID_TABLE {
             spidrv.driver.of_match_table = t.as_ref();
         }
@@ -62,7 +67,7 @@ impl<T: Driver> driver::DriverOps for Adapter<T> {
 }
 
 impl<T: Driver> Adapter<T> {
-    fn get_id_info(dev: &Device) -> Option<&'static T::IdInfo> {
+    fn get_of_id_info(dev: &Device) -> Option<&'static T::IdInfo> {
         let table = T::OF_DEVICE_ID_TABLE?;
 
         // SAFETY: `table` has static lifetime, so it is valid for read. `dev` is guaranteed to be
@@ -93,6 +98,31 @@ impl<T: Driver> Adapter<T> {
         }
     }
 
+    fn get_spi_id_info(dev: &Device) -> Option<&'static T::IdInfo> {
+        // SAFETY: `dev` is guaranteed to be valid while it's alive.
+        let id = unsafe { bindings::spi_get_device_id(dev.0) };
+        if id.is_null() {
+            return None;
+        }
+
+        // SAFETY: `id` is a pointer within the static table, so it's always valid.
+        let offset = unsafe { (*id).driver_data };
+
+        // SAFETY: The offset comes from a previous call to `offset_from` in `IdArray::new`, which
+        // guarantees that the resulting pointer is within the table.
+        let ptr = unsafe {
+            id.cast::<u8>()
+                .offset(offset as _)
+                .cast::<Option<T::IdInfo>>()
+        };
+
+        // SAFETY: The id table has a static lifetime, so `ptr` is guaranteed to be valid for read.
+        #[allow(clippy::needless_borrow)]
+        unsafe {
+            (&*ptr).as_ref()
+        }
+    }
+
     extern "C" fn probe_callback(spidev: *mut bindings::spi_device) -> core::ffi::c_int {
         from_kernel_result! {
             // SAFETY: `spidev` is valid by the contract with the C code. `dev` is alive only for the
@@ -100,8 +130,9 @@ impl<T: Driver> Adapter<T> {
             // `spidev`.
             unsafe { Device::from_ptr(spidev) }
                 .and_then(|dev| {
-                    let info = Self::get_id_info(&dev);
-                    let data = T::probe(dev, info)?;
+                    let of_info = Self::get_of_id_info(&dev);
+                    let spi_info = Self::get_spi_id_info(&dev);
+                    let data = T::probe(dev, of_info, spi_info)?;
                     // SAFETY: `spidev` is guaranteed to be a valid, non-null pointer.
                     unsafe { bindings::spi_set_drvdata(spidev, data.into_foreign() as _) };
                     Ok(0)
@@ -138,6 +169,56 @@ impl<T: Driver> Adapter<T> {
     }
 }
 
+/// A SPI deivce ID
+#[derive(Copy, Clone)]
+pub struct DeviceId(pub &'static BStr);
+
+unsafe impl const driver::RawDeviceId for DeviceId {
+    type RawType = bindings::spi_device_id;
+
+    const ZERO: Self::RawType = bindings::spi_device_id {
+        name: [0; bindings::SPI_NAME_SIZE as _],
+        driver_data: 0,
+    };
+
+    fn to_rawid(&self, offset: isize) -> Self::RawType {
+        let mut id = bindings::spi_device_id {
+            driver_data: offset as _,
+            ..Self::ZERO
+        };
+
+        let mut i = 0;
+        while i < self.0.len() {
+            id.name[i] = self.0[i] as _;
+            i += 1;
+        }
+        id.name[i] = b'\0' as _;
+
+        id
+    }
+}
+
+/// Define a const SPI device ID table
+///
+/// The name of the const is `SPI_DEVICE_ID_TABLE`.
+///
+/// # Example
+///
+/// ```
+/// use kernel::spi;
+///
+/// define_i2c_id_table! {u32, [
+///     (spi::DeviceId(b"test-device1"), Some(0xff)),
+///     (spi::DeviceId(b"test-device2"), None),
+/// ]};
+/// ```
+#[macro_export]
+macro_rules! define_spi_id_table {
+    ($data_type:ty, $($t:tt)*) => {
+        $crate::define_id_table!(SPI_DEVICE_ID_TABLE, $crate::spi::DeviceId, $data_type, $($t)*);
+    }
+}
+
 /// A SPI driver.
 pub trait Driver {
     /// Data stored on device by driver.
@@ -155,11 +236,18 @@ pub trait Driver {
     /// The table of device ids supported by the driver.
     const OF_DEVICE_ID_TABLE: Option<driver::IdTable<'static, of::DeviceId, Self::IdInfo>> = None;
 
+    /// The table of device ids supported by the driver.
+    const SPI_DEVICE_ID_TABLE: Option<driver::IdTable<'static, DeviceId, Self::IdInfo>> = None;
+
     /// SPI driver probe.
     ///
     /// Called when a new SPI device is added or discovered.
     /// Implementers should attempt to initialize the device here.
-    fn probe(dev: Device, id_info: Option<&Self::IdInfo>) -> Result<Self::Data>;
+    fn probe(
+        dev: Device,
+        of_id_info: Option<&Self::IdInfo>,
+        spi_id_info: Option<&Self::IdInfo>,
+    ) -> Result<Self::Data>;
 
     /// SPI driver remove.
     ///
@@ -251,7 +339,7 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        // SAFETY: The refcount of `spi_device` is incremented when constructing `Device`.
+        // SAFETY: The refcount of `spi_device` was incremented when constructing `Device`.
         unsafe { bindings::spi_dev_put(self.0) };
     }
 }
