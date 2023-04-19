@@ -52,6 +52,39 @@ impl Device {
         unsafe { &*ptr.cast() }
     }
 
+    /// Get the slice to the device address of a net_device
+    pub fn device_address(&self) -> &[u8] {
+        let dev = self.0.get();
+        // SAFETY:
+        //  - The netdev is valid because the shared reference guarantees a nonzero refcount.
+        //  - `dev_addr` is long enough to hold at least `addr_len` elements.
+        unsafe { core::slice::from_raw_parts((*dev).dev_addr, (*dev).addr_len as _) }
+    }
+
+    /// Get IRQ number of the net_device.
+    pub fn get_irq(&self) -> isize {
+        // SAFETY: `Device` is alive until it gets dropped
+        unsafe { (*self.0.get()).irq as _ }
+    }
+
+    /// Set IRQ number of the net_device.
+    pub fn set_irq(&self, irq: isize) {
+        // SAFETY: `Device` is alive until it gets dropped
+        unsafe { addr_of_mut!((*self.0.get()).irq).write(irq as _) };
+    }
+
+    /// Get interface port information
+    pub fn get_if_port(&self) -> u8 {
+        // SAFETY: `Device` is alive until it gets dropped
+        unsafe { (*self.0.get()).irq as _ }
+    }
+
+    /// Set interface port information
+    pub fn set_if_port(&self, if_port: u8) {
+        // SAFETY: `Device` is alive until it gets dropped
+        unsafe { addr_of_mut!((*self.0.get()).if_port).write(if_port as _) };
+    }
+
     /// Sets carrier.
     pub fn netif_carrier_on(&self) {
         // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
@@ -68,6 +101,12 @@ impl Device {
     pub fn eth_hw_addr_set(&self, addr: &[u8; 6]) {
         // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
         unsafe { bindings::eth_hw_addr_set(self.0.get(), addr as _) }
+    }
+
+    /// Assigns Ethernet address to a net_device.
+    pub fn eth_hw_addr_random(&self) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { bindings::eth_hw_addr_random(self.0.get()) }
     }
 
     /// Returns the mtu of the device.
