@@ -310,6 +310,9 @@ struct InternalRegistration<T: ForeignOwnable> {
     _p: PhantomData<T>,
 }
 
+/// SAFETY: `InternalRegistration::data` implements Send
+unsafe impl<T: ForeignOwnable> Send for InternalRegistration<T> {}
+
 impl<T: ForeignOwnable> InternalRegistration<T> {
     /// Registers a new irq handler.
     ///
@@ -372,7 +375,7 @@ impl<T: ForeignOwnable> Drop for InternalRegistration<T> {
 /// An irq handler.
 pub trait Handler {
     /// The context data associated with and made available to the handler.
-    type Data: ForeignOwnable;
+    type Data: ForeignOwnable + Send;
 
     /// Called from interrupt context when the irq happens.
     fn handle_irq(data: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Return;
