@@ -726,6 +726,12 @@ void rust_helper_eth_hw_addr_set(struct net_device *dev, const u8 *addr)
 }
 EXPORT_SYMBOL_GPL(rust_helper_eth_hw_addr_set);
 
+void rust_helper_eth_hw_addr_random(struct net_device *dev)
+{
+	eth_hw_addr_random(dev);
+}
+EXPORT_SYMBOL_GPL(rust_helper_eth_hw_addr_random);
+
 void rust_helper_netif_start_queue(struct net_device *dev)
 {
 	netif_start_queue(dev);
