@@ -200,6 +200,11 @@ impl<T: DeviceOperations> Drop for Registration<T> {
             }
             bindings::free_netdev(self.dev);
         }
+
+        // SAFETY:
+        //   - we allocated this pointer using `T::Data::into_foreign`,
+        //     so it is safe to turn back into a `T::Data`.
+        unsafe { T::Data::from_foreign(bindings::dev_get_drvdata(&mut (*self.dev).dev)) };
     }
 }
 
