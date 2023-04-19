@@ -283,9 +283,8 @@ unsafe impl AlwaysRefCounted for Device {
 }
 
 // SAFETY:
-//  - `Device` holds the lock of device when needed.
+//  - `Device` holds the lock of the device when needed.
 //  - `Device` does not let you touch the underlying pointer to `spi_device`.
-unsafe impl Sync for Device {}
 unsafe impl Send for Device {}
 
 impl Device {
@@ -305,6 +304,12 @@ impl Device {
             // INVARIANT: The safety requirements of the function ensure the lifetime invariant.
             Ok(Self(ptr))
         }
+    }
+
+    /// Get IRQ number of the SPI device.
+    pub fn get_irq(&self) -> isize {
+        // SAFETY: `Device` is alive until it gets dropped
+        unsafe { (*self.0).irq as _ }
     }
 
     /// SPI synchronous write followed by read.
