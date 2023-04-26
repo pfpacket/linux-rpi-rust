@@ -9,7 +9,7 @@ use crate::{
     bindings,
     device::{self, RawDevice},
     driver,
-    error::{code::*, from_kernel_result, Error, Result},
+    error::{code::*, from_kernel_result, Result},
     of,
     str::{BStr, CStr},
     to_result,
@@ -315,7 +315,7 @@ impl Device {
     /// SPI synchronous write followed by read.
     pub fn write_then_read(&self, tx_buf: &[u8], rx_buf: &mut [u8]) -> Result {
         // SAFETY: `Device` is alive until it gets dropped
-        let res = unsafe {
+        to_result(unsafe {
             bindings::spi_write_then_read(
                 self.0,
                 tx_buf.as_ptr() as *const core::ffi::c_void,
@@ -323,22 +323,29 @@ impl Device {
                 rx_buf.as_mut_ptr() as *mut core::ffi::c_void,
                 rx_buf.len() as core::ffi::c_uint,
             )
-        };
-
-        match res {
-            0 => Ok(()),
-            err => Err(Error::from_kernel_errno(err)),
-        }
+        })
     }
 
     /// SPI synchronous write
     pub fn write(&self, tx_buf: &[u8]) -> Result {
-        self.write_then_read(tx_buf, &mut [0u8, 0])
+        to_result(unsafe {
+            bindings::spi_write(
+                self.0,
+                tx_buf.as_ptr() as *const core::ffi::c_void,
+                tx_buf.len() as core::ffi::c_size_t,
+            )
+        })
     }
 
     /// SPI synchronous read
     pub fn read(&self, rx_buf: &mut [u8]) -> Result {
-        self.write_then_read(&[0u8, 0], rx_buf)
+        to_result(unsafe {
+            bindings::spi_read(
+                self.0,
+                rx_buf.as_ptr() as *mut core::ffi::c_void,
+                rx_buf.len() as core::ffi::c_size_t,
+            )
+        })
     }
 }
 

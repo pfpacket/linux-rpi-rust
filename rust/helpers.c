@@ -686,6 +686,18 @@ void rust_helper_spi_dev_put(struct spi_device *spi)
 	spi_dev_put(spi);
 }
 EXPORT_SYMBOL_GPL(rust_helper_spi_dev_put);
+
+int rust_helper_spi_write(struct spi_device *spi, const void *buf, size_t len)
+{
+	return spi_write(spi, buf, len);
+}
+EXPORT_SYMBOL_GPL(rust_helper_spi_write);
+
+int rust_helper_spi_read(struct spi_device *spi, void *buf, size_t len)
+{
+	return spi_read(spi, buf, len);
+}
+EXPORT_SYMBOL_GPL(rust_helper_spi_read);
 #endif
 
 /*
