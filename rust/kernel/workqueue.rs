@@ -282,6 +282,17 @@ impl Queue {
         self.enqueue(w.into());
         Ok(())
     }
+
+    /// Ensure that any scheduled work has run to completion.
+    ///
+    /// This function sleeps until all work items which were queued on entry
+    /// have finished execution, but it is not livelocked by new incoming ones.
+    pub fn flush(&self) {
+        // SAFETY: Having a shared reference to work queue guarantees that it remains valid.
+        unsafe {
+            bindings::__flush_workqueue(self.0.get());
+        }
+    }
 }
 
 struct ClosureAdapter<T: Fn() + Send> {
