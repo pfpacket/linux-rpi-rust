@@ -738,6 +738,12 @@ void rust_helper_netif_start_queue(struct net_device *dev)
 }
 EXPORT_SYMBOL_GPL(rust_helper_netif_start_queue);
 
+void rust_helper_netif_wake_queue(struct net_device *dev)
+{
+	netif_wake_queue(dev);
+}
+EXPORT_SYMBOL_GPL(rust_helper_netif_wake_queue);
+
 void rust_helper_netif_stop_queue(struct net_device *dev) {
 	netif_stop_queue(dev);
 }

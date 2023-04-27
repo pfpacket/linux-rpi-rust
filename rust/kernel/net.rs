@@ -157,6 +157,13 @@ impl Device {
         unsafe { bindings::netif_start_queue(self.0.get()) }
     }
 
+    /// Allows the upper layers to transmit.
+    /// Used for flow control when transmit resources are available.
+    pub fn netif_wake_queue(&self) {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        unsafe { bindings::netif_wake_queue(self.0.get()) }
+    }
+
     /// Stop the upper layers to transmit.
     pub fn netif_stop_queue(&self) {
         // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
@@ -174,6 +181,25 @@ impl Device {
             Ok(unsafe { &*(skb as *const SkBuff) }.into())
         }
     }
+
+    /// Post buffer to the network code.
+    pub fn netif_rx(&self, skb: &SkBuff) -> BacklogCongestionLevel {
+        // SAFETY: The netdev is valid because the shared reference guarantees a nonzero refcount.
+        match unsafe { bindings::netif_rx(skb.0.get()) } as _ {
+            bindings::NET_RX_SUCCESS => BacklogCongestionLevel::NetRxSuccess,
+            bindings::NET_RX_DROP => BacklogCongestionLevel::NetRxDrop,
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// Backlog congestion levels.
+#[repr(u32)]
+pub enum BacklogCongestionLevel {
+    /// Keep 'em coming, baby.
+    NetRxSuccess = bindings::NET_RX_SUCCESS,
+    /// Packet dropped.
+    NetRxDrop = bindings::NET_RX_DROP,
 }
 
 /// Registration structure for a network device.
@@ -396,7 +422,9 @@ impl<T: DeviceOperations> Registration<T> {
         let skb = unsafe { SkBuff::from_ptr(skb) };
         // SAFETY: The value stored as driver data was returned by `into_foreign` during registration.
         let data = unsafe { T::Data::borrow(bindings::dev_get_drvdata(&mut (*netdev).dev)) };
-        T::start_xmit(skb, dev, data) as bindings::netdev_tx_t
+        let ret = T::start_xmit(skb, dev, data) as bindings::netdev_tx_t;
+        unsafe { AlwaysRefCounted::dec_ref(skb.into()) };
+        ret
     }
 }
 
@@ -503,6 +531,32 @@ impl SkBuff {
     pub fn len(&self) -> u32 {
         // SAFETY: The existence of a shared reference means `self.0` is valid.
         unsafe { core::ptr::addr_of!((*self.0.get()).len).read() }
+    }
+
+    /// Add data to a buffer.
+    ///
+    /// This function extends the used data area of the buffer. If this would exceed the
+    /// total buffer size the kernel will panic. A pointer to the first byte of the
+    /// extra data is returned.
+    #[allow(clippy::mut_from_ref)]
+    pub fn put(&self, len: usize) -> &mut [u8] {
+        unsafe {
+            // SAFETY: The existence of a shared reference means that the refcount is nonzero.
+            let ptr = bindings::skb_put(self.0.get(), len as _);
+            core::slice::from_raw_parts_mut(ptr.cast(), len)
+        }
+    }
+
+    /// Determine the packet's protocol ID.
+    pub fn eth_type_trans(&self, dev: &Device) -> u16 {
+        // SAFETY: The existence of a shared reference means that the refcount is nonzero.
+        unsafe { bindings::eth_type_trans(self.0.get(), dev.0.get()) }
+    }
+
+    /// Set `protocol` field.
+    pub fn set_protocol(&self, protocol: u16) {
+        // SAFETY: The existence of a shared reference means that the refcount is nonzero.
+        unsafe { (*self.0.get()).__bindgen_anon_5.__bindgen_anon_1.as_mut() }.protocol = protocol;
     }
 }
 
