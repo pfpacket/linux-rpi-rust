@@ -698,6 +698,18 @@ int rust_helper_spi_read(struct spi_device *spi, void *buf, size_t len)
 	return spi_read(spi, buf, len);
 }
 EXPORT_SYMBOL_GPL(rust_helper_spi_read);
+
+void rust_helper_spi_message_init(struct spi_message *m)
+{
+	spi_message_init(m);
+}
+EXPORT_SYMBOL_GPL(rust_helper_spi_message_init);
+
+void rust_helper_spi_message_add_tail(struct spi_transfer *t, struct spi_message *m)
+{
+	spi_message_add_tail(t, m);
+}
+EXPORT_SYMBOL_GPL(rust_helper_spi_message_add_tail);
 #endif
 
 /*

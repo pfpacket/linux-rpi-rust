@@ -326,6 +326,37 @@ impl Device {
         })
     }
 
+    /// Blocking/synchronous SPI data transfers
+    ///
+    /// This call may only be used from a context that may sleep.  The sleep
+    /// is non-interruptible, and has no timeout.  Low-overhead controller
+    /// drivers may DMA directly into and out of the message buffers.
+    ///
+    /// # Safety
+    /// `tx_buf` and `rx_buf` must be DMA-safe otherwise UB.
+    pub unsafe fn sync(&self, tx_buf: &[u8], rx_buf: &mut [u8]) -> Result {
+        let mut tx_transfer = bindings::spi_transfer {
+            tx_buf: tx_buf.as_ptr() as _,
+            len: tx_buf.len() as _,
+            ..Default::default()
+        };
+        let mut rx_transfer = bindings::spi_transfer {
+            rx_buf: rx_buf.as_mut_ptr() as _,
+            len: rx_buf.len() as _,
+            ..Default::default()
+        };
+
+        let mut message: bindings::spi_message = Default::default();
+        unsafe {
+            bindings::spi_message_init(&mut message as _);
+            bindings::spi_message_add_tail(&mut tx_transfer as _, &mut message as _);
+            bindings::spi_message_add_tail(&mut rx_transfer as _, &mut message as _);
+
+            // SAFETY: `Device` is alive until it gets dropped
+            to_result(bindings::spi_sync(self.0, &mut message as _))
+        }
+    }
+
     /// SPI synchronous write
     pub fn write(&self, tx_buf: &[u8]) -> Result {
         to_result(unsafe {
